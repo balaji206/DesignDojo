@@ -1,0 +1,1565 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import {
+  ReactFlow,
+  Background,
+  Controls,
+  Connection,
+  Node,
+  Edge,
+  useNodesState,
+  useEdgesState,
+  MarkerType,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import {
+  ArrowLeft,
+  Plus,
+  Send,
+  Trash2,
+  Sparkles,
+  CheckCircle2,
+  Info,
+  RotateCcw,
+  Layers,
+  Undo2,
+  Redo2,
+  Download,
+  Upload,
+  Check,
+  Save,
+} from 'lucide-react';
+import { api, getLearnerSessionId } from '../api/client';
+import {
+  DiagramDraft,
+  DiagramShape,
+  downloadDiagramJson,
+  draftToSubmission,
+  exportDiagramToJson,
+  loadDraft,
+  parseDiagramImport,
+  saveDraft,
+} from '../utils/diagramPersistence';
+import {
+  ClassDefinition,
+  ClassKind,
+  PracticeAttempt,
+  Problem,
+  Relationship,
+  RelationshipType,
+  Submission,
+  Visibility,
+} from '../types/domain';
+import { ClassNode } from '../components/ClassNode';
+
+const nodeTypes = { classNode: ClassNode };
+
+const STARTER_TEMPLATES: Record<string, Submission> = {
+  'parking-lot': {
+    classes: [
+      {
+        id: 'cls-lot',
+        name: 'ParkingLot',
+        kind: 'class',
+        attributes: [{ id: 'a1', name: 'floors', type: 'List<ParkingFloor>', visibility: '-' }],
+        methods: [{ id: 'm1', name: 'issueTicket', returnType: 'ParkingTicket', visibility: '+', parameters: [{ name: 'v', type: 'Vehicle' }] }],
+        layout: { x: 80, y: 60, width: 240, height: 140, rotation: 0 },
+      },
+      {
+        id: 'cls-floor',
+        name: 'ParkingFloor',
+        kind: 'class',
+        attributes: [{ id: 'a2', name: 'floorNumber', type: 'int', visibility: '-' }],
+        methods: [{ id: 'm2', name: 'findAvailableSpot', returnType: 'ParkingSpot', visibility: '+', parameters: [{ name: 'v', type: 'Vehicle' }] }],
+        layout: { x: 420, y: 60, width: 240, height: 140, rotation: 0 },
+      },
+      {
+        id: 'cls-spot',
+        name: 'ParkingSpot',
+        kind: 'class',
+        attributes: [{ id: 'a3', name: 'isOccupied', type: 'boolean', visibility: '-' }],
+        methods: [{ id: 'm3', name: 'assignVehicle', returnType: 'boolean', visibility: '+', parameters: [{ name: 'v', type: 'Vehicle' }] }],
+        layout: { x: 420, y: 260, width: 240, height: 140, rotation: 0 },
+      },
+      {
+        id: 'cls-vehicle',
+        name: 'Vehicle',
+        kind: 'abstract',
+        attributes: [{ id: 'a4', name: 'licensePlate', type: 'string', visibility: '#' }],
+        methods: [],
+        layout: { x: 80, y: 260, width: 220, height: 120, rotation: 0 },
+      },
+      {
+        id: 'cls-ticket',
+        name: 'ParkingTicket',
+        kind: 'class',
+        attributes: [{ id: 'a5', name: 'entryTime', type: 'Date', visibility: '-' }],
+        methods: [],
+        layout: { x: 80, y: 430, width: 220, height: 120, rotation: 0 },
+      },
+      {
+        id: 'cls-pricing',
+        name: 'PricingStrategy',
+        kind: 'interface',
+        attributes: [],
+        methods: [{ id: 'm4', name: 'calculateFee', returnType: 'number', visibility: '+', parameters: [{ name: 'ticket', type: 'ParkingTicket' }] }],
+        layout: { x: 420, y: 430, width: 250, height: 120, rotation: 0 },
+      },
+    ],
+    relationships: [
+      { id: 'r1', sourceId: 'cls-lot', targetId: 'cls-floor', type: 'composition', label: 'manages', sourceMultiplicity: '1', targetMultiplicity: '1..*' },
+      { id: 'r2', sourceId: 'cls-floor', targetId: 'cls-spot', type: 'composition', label: 'contains', sourceMultiplicity: '1', targetMultiplicity: '1..*' },
+      { id: 'r3', sourceId: 'cls-spot', targetId: 'cls-vehicle', type: 'association', label: 'occupies', sourceMultiplicity: '1', targetMultiplicity: '0..1' },
+      { id: 'r4', sourceId: 'cls-lot', targetId: 'cls-pricing', type: 'dependency', label: 'delegates fee', sourceMultiplicity: '1', targetMultiplicity: '1' },
+    ],
+    rationale:
+      'Used Composition for ParkingLot -> ParkingFloor -> ParkingSpot lifecycle management, an abstract Vehicle base class, and a PricingStrategy interface to satisfy the Open/Closed Principle.',
+  },
+  'elevator-system': {
+    classes: [
+      {
+        id: 'cls-ctrl',
+        name: 'ElevatorController',
+        kind: 'class',
+        attributes: [{ id: 'e1', name: 'cars', type: 'List<ElevatorCar>', visibility: '-' }],
+        methods: [{ id: 'em1', name: 'requestElevator', returnType: 'ElevatorCar', visibility: '+', parameters: [{ name: 'req', type: 'HallRequest' }] }],
+        layout: { x: 80, y: 80, width: 250, height: 140, rotation: 0 },
+      },
+      {
+        id: 'cls-car',
+        name: 'ElevatorCar',
+        kind: 'class',
+        attributes: [{ id: 'e2', name: 'currentFloor', type: 'int', visibility: '-' }],
+        methods: [{ id: 'em2', name: 'move', returnType: 'void', visibility: '+', parameters: [] }],
+        layout: { x: 420, y: 80, width: 230, height: 140, rotation: 0 },
+      },
+      {
+        id: 'cls-sched',
+        name: 'DispatchStrategy',
+        kind: 'interface',
+        attributes: [],
+        methods: [{ id: 'em3', name: 'selectElevator', returnType: 'ElevatorCar', visibility: '+', parameters: [{ name: 'req', type: 'HallRequest' }] }],
+        layout: { x: 80, y: 290, width: 250, height: 130, rotation: 0 },
+      },
+      {
+        id: 'cls-req',
+        name: 'HallRequest',
+        kind: 'class',
+        attributes: [{ id: 'e3', name: 'targetFloor', type: 'int', visibility: '-' }],
+        methods: [],
+        layout: { x: 420, y: 290, width: 220, height: 120, rotation: 0 },
+      },
+    ],
+    relationships: [
+      { id: 'er1', sourceId: 'cls-ctrl', targetId: 'cls-car', type: 'composition', label: 'coordinates', sourceMultiplicity: '1', targetMultiplicity: '1..*' },
+      { id: 'er2', sourceId: 'cls-ctrl', targetId: 'cls-sched', type: 'dependency', label: 'routes via', sourceMultiplicity: '1', targetMultiplicity: '1' },
+      { id: 'er3', sourceId: 'cls-ctrl', targetId: 'cls-req', type: 'association', label: 'handles', sourceMultiplicity: '1', targetMultiplicity: '*' },
+    ],
+    rationale: 'Injected DispatchStrategy into ElevatorController so scheduling algorithms (SCAN/LOOK) can be swapped without modifying ElevatorCar.',
+  },
+  'vending-machine': {
+    classes: [
+      {
+        id: 'cls-vm',
+        name: 'VendingMachine',
+        kind: 'class',
+        attributes: [{ id: 'v1', name: 'balance', type: 'number', visibility: '-' }],
+        methods: [{ id: 'vm1', name: 'selectItem', returnType: 'void', visibility: '+', parameters: [{ name: 'code', type: 'string' }] }],
+        layout: { x: 80, y: 80, width: 240, height: 140, rotation: 0 },
+      },
+      {
+        id: 'cls-state',
+        name: 'VendingState',
+        kind: 'interface',
+        attributes: [],
+        methods: [{ id: 'vm2', name: 'insertMoney', returnType: 'void', visibility: '+', parameters: [{ name: 'amount', type: 'number' }] }],
+        layout: { x: 420, y: 80, width: 240, height: 130, rotation: 0 },
+      },
+      {
+        id: 'cls-inv',
+        name: 'Inventory',
+        kind: 'class',
+        attributes: [{ id: 'v2', name: 'slots', type: 'Map<string, Product>', visibility: '-' }],
+        methods: [{ id: 'vm3', name: 'deduct', returnType: 'boolean', visibility: '+', parameters: [{ name: 'code', type: 'string' }] }],
+        layout: { x: 80, y: 290, width: 240, height: 130, rotation: 0 },
+      },
+      {
+        id: 'cls-prod',
+        name: 'Product',
+        kind: 'class',
+        attributes: [{ id: 'v3', name: 'price', type: 'number', visibility: '-' }],
+        methods: [],
+        layout: { x: 420, y: 290, width: 220, height: 120, rotation: 0 },
+      },
+    ],
+    relationships: [
+      { id: 'vr1', sourceId: 'cls-vm', targetId: 'cls-state', type: 'association', label: 'delegates state', sourceMultiplicity: '1', targetMultiplicity: '1' },
+      { id: 'vr2', sourceId: 'cls-vm', targetId: 'cls-inv', type: 'composition', label: 'owns', sourceMultiplicity: '1', targetMultiplicity: '1' },
+      { id: 'vr3', sourceId: 'cls-inv', targetId: 'cls-prod', type: 'aggregation', label: 'stocks', sourceMultiplicity: '1', targetMultiplicity: '*' },
+    ],
+    rationale: 'Applied State Pattern via VendingState interface to avoid sprawling conditional checks across Idle, HasMoney, and Dispensing states.',
+  },
+};
+
+interface HistorySnapshot {
+  classes: ClassDefinition[];
+  relationships: Relationship[];
+}
+
+export const Workspace: React.FC = () => {
+  const { slug } = useParams<{ slug: string }>();
+  const [searchParams] = useSearchParams();
+
+  const [problem, setProblem] = useState<Problem | null>(null);
+  const [attempts, setAttempts] = useState<PracticeAttempt[]>([]);
+  const [activeTab, setActiveTab] = useState<'DESIGN' | 'EVALUATION' | 'HISTORY'>('DESIGN');
+  const [leftSection, setLeftSection] = useState<'DESC' | 'HINTS' | 'HISTORY'>('DESC');
+
+  const [classes, setClasses] = useState<ClassDefinition[]>([]);
+  const [relationships, setRelationships] = useState<Relationship[]>([]);
+  const [shapes, setShapes] = useState<DiagramShape[]>([]);
+  const [shapeEdges, setShapeEdges] = useState<any[]>([]);
+  const [rationale, setRationale] = useState<string>('');
+  const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
+  const [selectedRelId, setSelectedRelId] = useState<string | null>(null);
+  const [highlightedIds, setHighlightedIds] = useState<string[]>([]);
+
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [autosaveStatus, setAutosaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isLoadedRef = useRef(false);
+  const latestStateRef = useRef({ classes, relationships, shapes, shapeEdges, rationale });
+
+  latestStateRef.current = { classes, relationships, shapes, shapeEdges, rationale };
+  isLoadedRef.current = isLoaded;
+
+  const [past, setPast] = useState<HistorySnapshot[]>([]);
+  const [future, setFuture] = useState<HistorySnapshot[]>([]);
+
+  const recordSnapshot = useCallback(() => {
+    setPast((prev) => [
+      ...prev.slice(-19),
+      JSON.parse(JSON.stringify({ classes, relationships })),
+    ]);
+    setFuture([]);
+  }, [classes, relationships]);
+
+  const handleUndo = useCallback(() => {
+    if (past.length === 0) return;
+    const previous = past[past.length - 1];
+    setFuture((f) => [JSON.parse(JSON.stringify({ classes, relationships })), ...f]);
+    setPast((p) => p.slice(0, -1));
+    setClasses(previous.classes);
+    setRelationships(previous.relationships);
+  }, [past, classes, relationships]);
+
+  const handleRedo = useCallback(() => {
+    if (future.length === 0) return;
+    const next = future[0];
+    setPast((p) => [...p, JSON.parse(JSON.stringify({ classes, relationships }))]);
+    setFuture((f) => f.slice(1));
+    setClasses(next.classes);
+    setRelationships(next.relationships);
+  }, [future, classes, relationships]);
+
+  const [currentAttempt, setCurrentAttempt] = useState<PracticeAttempt | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+
+  useEffect(() => {
+    setNodes(
+      classes.map((cls) => ({
+        id: cls.id,
+        type: 'classNode',
+        position: { x: cls.layout?.x ?? 120, y: cls.layout?.y ?? 100 },
+        selected: cls.id === selectedClassId,
+        data: {
+          classDef: cls,
+          highlighted: highlightedIds.includes(cls.id),
+        },
+      }))
+    );
+  }, [classes, selectedClassId, highlightedIds, setNodes]);
+
+  useEffect(() => {
+    setEdges(
+      relationships.map((rel) => {
+        const isHighlighted = highlightedIds.includes(rel.id);
+        return {
+          id: rel.id,
+          source: rel.sourceId,
+          target: rel.targetId,
+          selected: rel.id === selectedRelId,
+          label: `${rel.sourceMultiplicity || '1'}  [${rel.type}]${rel.label ? ' ' + rel.label : ''}  ${rel.targetMultiplicity || '*'}`,
+          animated: rel.type === 'dependency',
+          style: {
+            stroke: isHighlighted ? '#f43f5e' : rel.id === selectedRelId ? '#818cf8' : '#64748b',
+            strokeWidth: isHighlighted || rel.id === selectedRelId ? 2.5 : 1.8,
+          },
+          labelStyle: { fill: '#e2e8f0', fontSize: 10, fontFamily: 'monospace' },
+          labelBgStyle: { fill: '#0f172a', fillOpacity: 0.85 },
+          markerEnd: {
+            type: rel.type === 'inheritance' ? MarkerType.ArrowClosed : MarkerType.Arrow,
+            color: isHighlighted ? '#f43f5e' : '#94a3b8',
+          },
+        };
+      })
+    );
+  }, [relationships, selectedRelId, highlightedIds, setEdges]);
+
+  const loadSubmissionIntoEditor = useCallback((sub: Submission) => {
+    setClasses(JSON.parse(JSON.stringify(sub.classes || [])));
+    setRelationships(JSON.parse(JSON.stringify(sub.relationships || [])));
+    setRationale(sub.rationale || '');
+    setSelectedClassId(null);
+    setSelectedRelId(null);
+    setHighlightedIds([]);
+    setPast([]);
+    setFuture([]);
+  }, []);
+
+  const loadDraftIntoEditor = useCallback((draft: DiagramDraft) => {
+    setClasses(JSON.parse(JSON.stringify(draft.classes || [])));
+    setRelationships(JSON.parse(JSON.stringify(draft.relationships || [])));
+    setShapes(draft.shapes || []);
+    setShapeEdges(draft.shapeEdges || []);
+    setRationale(draft.rationale || '');
+    setSelectedClassId(null);
+    setSelectedRelId(null);
+    setHighlightedIds([]);
+    setPast([]);
+    setFuture([]);
+  }, []);
+
+  useEffect(() => {
+    if (!slug) return;
+    const learnerId = getLearnerSessionId();
+
+    Promise.all([api.getProblem(slug), api.getProblemAttempts(slug)]).then(
+      ([probData, attList]) => {
+        setProblem(probData);
+        setAttempts(attList);
+
+        const requestedAttemptId = searchParams.get('attemptId');
+        if (requestedAttemptId) {
+          const targetAttempt = attList.find((a) => a.id === requestedAttemptId);
+          if (targetAttempt) {
+            setCurrentAttempt(targetAttempt);
+            loadSubmissionIntoEditor(targetAttempt.submission);
+            setIsLoaded(true);
+            return;
+          }
+        }
+
+        // Check if a saved draft exists for this problem & learner
+        const existingDraft = loadDraft(slug, learnerId);
+        if (existingDraft) {
+          // Do not overwrite existing draft!
+          loadDraftIntoEditor(existingDraft);
+          setLastSavedAt(existingDraft.updatedAt);
+          setAutosaveStatus('saved');
+        } else {
+          // No draft exists. Check if prior attempts exist
+          const latestAttempt = attList[0];
+          if (latestAttempt) {
+            setCurrentAttempt(latestAttempt);
+            loadSubmissionIntoEditor(latestAttempt.submission);
+          } else {
+            // First time opening problem: starter class
+            setClasses([
+              {
+                id: 'cls-starter-1',
+                name: 'MainCoordinator',
+                kind: 'class',
+                attributes: [{ id: 'attr-1', name: 'id', type: 'string', visibility: '-' }],
+                methods: [{ id: 'meth-1', name: 'initialize', returnType: 'void', visibility: '+', parameters: [] }],
+                layout: { x: 180, y: 120, width: 220, height: 140, rotation: 0 },
+              },
+            ]);
+          }
+        }
+
+        setIsLoaded(true);
+      }
+    );
+  }, [slug, searchParams, loadSubmissionIntoEditor, loadDraftIntoEditor]);
+
+  // Debounced Autosave: strictly reads latestStateRef.current to prevent race conditions & stale state
+  useEffect(() => {
+    if (!isLoadedRef.current || !slug) return;
+
+    setAutosaveStatus('saving');
+    const timer = setTimeout(() => {
+      const current = latestStateRef.current;
+      const saved = saveDraft(slug, current, getLearnerSessionId());
+      setLastSavedAt(saved.updatedAt);
+      setAutosaveStatus('saved');
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [slug, classes, relationships, shapes, shapeEdges, rationale]);
+
+  const handleExportDiagram = () => {
+    if (!slug) return;
+    const current = latestStateRef.current;
+    const json = exportDiagramToJson(slug, current, getLearnerSessionId());
+    downloadDiagramJson(slug, json);
+  };
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !slug) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const draft = parseDiagramImport(content, slug);
+        recordSnapshot();
+        loadDraftIntoEditor(draft);
+        saveDraft(slug, draft, getLearnerSessionId());
+        setLastSavedAt(new Date().toISOString());
+        setAutosaveStatus('saved');
+      } catch (err: any) {
+        setErrorMsg(`Failed to import diagram: ${err?.message || 'Invalid JSON file'}`);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleAddClass = (kind: ClassKind) => {
+    recordSnapshot();
+    const id = 'cls-' + Math.random().toString(36).substring(2, 8);
+    const offset = classes.length * 40;
+    const newCls: ClassDefinition = {
+      id,
+      name: kind === 'interface' ? `I${classes.length + 1}Strategy` : `Class${classes.length + 1}`,
+      kind,
+      attributes:
+        kind === 'interface'
+          ? []
+          : [{ id: 'a-' + Date.now(), name: 'id', type: 'string', visibility: '-' }],
+      methods: [
+        {
+          id: 'm-' + Date.now(),
+          name: 'execute',
+          returnType: 'void',
+          visibility: '+',
+          parameters: [],
+        },
+      ],
+      layout: { x: 140 + (offset % 320), y: 100 + (offset % 240), width: 220, height: 140, rotation: 0 },
+    };
+    setClasses((prev) => [...prev, newCls]);
+    setSelectedClassId(id);
+    setSelectedRelId(null);
+  };
+
+  const handleLoadStarterTemplate = () => {
+    if (!problem) return;
+    const template = STARTER_TEMPLATES[problem.slug];
+    if (template) {
+      recordSnapshot();
+      loadSubmissionIntoEditor(template);
+    }
+  };
+
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      if (!connection.source || !connection.target) return;
+      recordSnapshot();
+      const newRel: Relationship = {
+        id: 'rel-' + Math.random().toString(36).substring(2, 8),
+        sourceId: connection.source,
+        targetId: connection.target,
+        type: 'association',
+        label: 'uses',
+        sourceMultiplicity: '1',
+        targetMultiplicity: '*',
+      };
+      setRelationships((prev) => [...prev, newRel]);
+      setSelectedRelId(newRel.id);
+      setSelectedClassId(null);
+    },
+    [recordSnapshot]
+  );
+
+  const onNodeDragStop = useCallback((_event: unknown, node: Node) => {
+    setClasses((prev) =>
+      prev.map((c) =>
+        c.id === node.id
+          ? {
+              ...c,
+              layout: {
+                ...(c.layout || { width: 220, height: 140, rotation: 0 }),
+                x: Math.round(node.position.x),
+                y: Math.round(node.position.y),
+              },
+            }
+          : c
+      )
+    );
+  }, []);
+
+  const handleDeleteSelected = () => {
+    recordSnapshot();
+    if (selectedClassId) {
+      setClasses((prev) => prev.filter((c) => c.id !== selectedClassId));
+      setRelationships((prev) =>
+        prev.filter((r) => r.sourceId !== selectedClassId && r.targetId !== selectedClassId)
+      );
+      setSelectedClassId(null);
+    } else if (selectedRelId) {
+      setRelationships((prev) => prev.filter((r) => r.id !== selectedRelId));
+      setSelectedRelId(null);
+    }
+  };
+
+  const handleSubmitDesign = async () => {
+    if (!problem) return;
+    setErrorMsg(null);
+    setSubmitting(true);
+    try {
+      const submission: Submission = draftToSubmission({ classes, relationships, rationale });
+      const attempt = await api.submitAttempt(problem.id, submission, currentAttempt?.id);
+      setCurrentAttempt(attempt);
+      setAttempts((prev) => [attempt, ...prev]);
+      setActiveTab('EVALUATION');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Submission failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleRetryFromAttempt = async (att: PracticeAttempt) => {
+    loadSubmissionIntoEditor(att.submission);
+    setCurrentAttempt(att);
+    setActiveTab('DESIGN');
+  };
+
+  const selectedClass = useMemo(
+    () => classes.find((c) => c.id === selectedClassId) || null,
+    [classes, selectedClassId]
+  );
+
+  const selectedRel = useMemo(
+    () => relationships.find((r) => r.id === selectedRelId) || null,
+    [relationships, selectedRelId]
+  );
+
+  const updateSelectedClass = (updater: (c: ClassDefinition) => ClassDefinition) => {
+    if (!selectedClassId) return;
+    setClasses((prev) => prev.map((c) => (c.id === selectedClassId ? updater(c) : c)));
+  };
+
+  const updateSelectedRel = (updater: (r: Relationship) => Relationship) => {
+    if (!selectedRelId) return;
+    setRelationships((prev) => prev.map((r) => (r.id === selectedRelId ? updater(r) : r)));
+  };
+
+  if (!problem) {
+    return (
+      <div className="h-screen bg-slate-950 text-slate-300 flex items-center justify-center text-sm">
+        Loading workspace...
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 flex flex-col">
+      <header className="h-14 border-b border-slate-800 bg-slate-900/90 px-4 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-3">
+          <Link
+            to="/"
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+            title="Back to Dashboard"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </Link>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="font-bold text-sm text-white">{problem.title}</h1>
+              <span className="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-indigo-300 font-medium">
+                {problem.difficulty}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800">
+          {(['DESIGN', 'EVALUATION', 'HISTORY'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-3.5 py-1 rounded-md text-xs font-medium transition ${
+                activeTab === tab
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {tab === 'DESIGN'
+                ? '1. Design Canvas'
+                : tab === 'EVALUATION'
+                ? `2. Evaluation ${
+                    currentAttempt?.report ? `(${currentAttempt.report.totalScore}/100)` : ''
+                  }`
+                : `3. Attempt History (${attempts.length})`}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Hidden file input for diagram JSON import */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleFileImport}
+            className="hidden"
+          />
+
+          {/* Autosave status indicator */}
+          <div
+            className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400 mr-1 px-2.5 py-1 rounded-md bg-slate-950/80 border border-slate-800"
+            title={
+              lastSavedAt
+                ? `Last autosaved at ${new Date(lastSavedAt).toLocaleTimeString()}`
+                : 'Autosave active'
+            }
+          >
+            {autosaveStatus === 'saving' ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span className="text-amber-300">Saving...</span>
+              </>
+            ) : autosaveStatus === 'saved' ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-emerald-300">Saved</span>
+              </>
+            ) : (
+              <>
+                <Save className="w-3.5 h-3.5 text-slate-500" />
+                <span>Autosave</span>
+              </>
+            )}
+          </div>
+
+          {/* Export Diagram JSON Action */}
+          <button
+            onClick={handleExportDiagram}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 flex items-center gap-1.5 transition shadow-sm"
+            title="Export full diagram in-memory state as downloadable JSON"
+          >
+            <Download className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="hidden md:inline">Export JSON</span>
+          </button>
+
+          {/* Import / Recover Diagram JSON Action */}
+          <button
+            onClick={handleImportClick}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 flex items-center gap-1.5 transition shadow-sm"
+            title="Import or recover diagram from an exported JSON or backup file"
+          >
+            <Upload className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden md:inline">Import JSON</span>
+          </button>
+
+          {STARTER_TEMPLATES[problem.slug] && (
+            <button
+              onClick={handleLoadStarterTemplate}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 transition"
+              title="Load starter reference template"
+            >
+              Load Reference Template
+            </button>
+          )}
+          <button
+            onClick={handleSubmitDesign}
+            disabled={submitting || classes.length === 0}
+            className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-emerald-600/20 transition"
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>{submitting ? 'Evaluating...' : 'Submit Design'}</span>
+          </button>
+        </div>
+      </header>
+
+      {errorMsg && (
+        <div className="bg-rose-950/90 border-b border-rose-500/40 px-4 py-2 text-xs text-rose-200 flex items-center justify-between">
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="underline">
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      <div className="flex-1 grid grid-cols-12 overflow-hidden">
+        <aside className="col-span-3 border-r border-slate-800 bg-slate-900/50 flex flex-col overflow-hidden">
+          <div className="flex border-b border-slate-800 text-xs font-medium bg-slate-900">
+            <button
+              onClick={() => setLeftSection('DESC')}
+              className={`flex-1 py-2.5 border-b-2 ${
+                leftSection === 'DESC'
+                  ? 'border-indigo-500 text-indigo-400'
+                  : 'border-transparent text-slate-400'
+              }`}
+            >
+              Description
+            </button>
+            <button
+              onClick={() => setLeftSection('HINTS')}
+              className={`flex-1 py-2.5 border-b-2 ${
+                leftSection === 'HINTS'
+                  ? 'border-indigo-500 text-indigo-400'
+                  : 'border-transparent text-slate-400'
+              }`}
+            >
+              Hints ({problem.hints.length})
+            </button>
+            <button
+              onClick={() => setLeftSection('HISTORY')}
+              className={`flex-1 py-2.5 border-b-2 ${
+                leftSection === 'HISTORY'
+                  ? 'border-indigo-500 text-indigo-400'
+                  : 'border-transparent text-slate-400'
+              }`}
+            >
+              History ({attempts.length})
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-5 text-xs leading-relaxed">
+            {leftSection === 'DESC' && (
+              <>
+                <div>
+                  <h3 className="text-slate-100 font-semibold text-sm mb-1">Problem Statement</h3>
+                  <p className="text-slate-300">{problem.description}</p>
+                </div>
+
+                <div>
+                  <h4 className="font-semibold text-slate-200 uppercase tracking-wider text-[11px] mb-2">
+                    Functional Requirements
+                  </h4>
+                  <ul className="list-disc pl-4 space-y-1.5 text-slate-300">
+                    {problem.functionalRequirements.map((req, i) => (
+                      <li key={i}>{req}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div>
+                  <h4 className="font-semibold text-slate-200 uppercase tracking-wider text-[11px] mb-2">
+                    Architectural Constraints
+                  </h4>
+                  <ul className="list-disc pl-4 space-y-1.5 text-slate-300">
+                    {problem.constraints.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div>
+                  <h4 className="font-semibold text-slate-200 uppercase tracking-wider text-[11px] mb-2">
+                    Acceptance Criteria
+                  </h4>
+                  <ul className="list-disc pl-4 space-y-1.5 text-emerald-300/90">
+                    {problem.acceptanceCriteria.map((ac, i) => (
+                      <li key={i}>{ac}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800">
+                  <label className="block font-semibold text-slate-200 uppercase tracking-wider text-[11px] mb-1.5">
+                    Design Rationale & Trade-Offs
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={rationale}
+                    onChange={(e) => setRationale(e.target.value)}
+                    placeholder="Explain your design patterns, SOLID choices, and concurrency assumptions..."
+                    className="w-full rounded-lg bg-slate-950 border border-slate-800 p-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </>
+            )}
+
+            {leftSection === 'HINTS' && (
+              <div className="space-y-3">
+                {problem.hints.map((h, i) => (
+                  <div
+                    key={i}
+                    className="p-3 rounded-lg bg-indigo-950/30 border border-indigo-500/30 text-indigo-200"
+                  >
+                    <span className="font-bold mr-1">Hint #{i + 1}:</span> {h}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {leftSection === 'HISTORY' && (
+              <div className="space-y-2.5">
+                {attempts.length === 0 ? (
+                  <p className="text-slate-500 text-center py-6">No previous attempts yet.</p>
+                ) : (
+                  attempts.map((att) => (
+                    <div
+                      key={att.id}
+                      className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-200">
+                          Attempt #{att.attemptNumber}
+                        </span>
+                        <span className="font-mono font-bold text-emerald-400">
+                          {att.report ? `${att.report.totalScore}/100` : att.status}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {new Date(att.createdAt).toLocaleString()}
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <button
+                          onClick={() => {
+                            setCurrentAttempt(att);
+                            loadSubmissionIntoEditor(att.submission);
+                            setActiveTab('EVALUATION');
+                          }}
+                          className="flex-1 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px]"
+                        >
+                          Inspect Report
+                        </button>
+                        <button
+                          onClick={() => handleRetryFromAttempt(att)}
+                          className="flex-1 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-[11px]"
+                        >
+                          Retry From This
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <section className="col-span-6 relative bg-slate-950 flex flex-col overflow-hidden">
+          {activeTab === 'DESIGN' && (
+            <>
+              <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5 bg-slate-900/95 border border-slate-800 p-1.5 rounded-xl shadow-xl">
+                <button
+                  onClick={() => handleAddClass('class')}
+                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Class</span>
+                </button>
+                <button
+                  onClick={() => handleAddClass('interface')}
+                  className="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-medium flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Interface</span>
+                </button>
+                <button
+                  onClick={() => handleAddClass('abstract')}
+                  className="px-2.5 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 text-xs font-medium flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Abstract</span>
+                </button>
+                <div className="h-4 w-px bg-slate-800 mx-0.5" />
+                <button
+                  onClick={handleUndo}
+                  disabled={past.length === 0}
+                  title="Undo"
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200"
+                >
+                  <Undo2 className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={handleRedo}
+                  disabled={future.length === 0}
+                  title="Redo"
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200"
+                >
+                  <Redo2 className="w-3.5 h-3.5" />
+                </button>
+                {(selectedClassId || selectedRelId) && (
+                  <button
+                    onClick={handleDeleteSelected}
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex-1 w-full h-full">
+                <ReactFlow
+                  nodes={nodes}
+                  edges={edges}
+                  onNodesChange={onNodesChange}
+                  onEdgesChange={onEdgesChange}
+                  onConnect={onConnect}
+                  onNodeDragStop={onNodeDragStop}
+                  nodeTypes={nodeTypes}
+                  onNodeClick={(_e, node) => {
+                    setSelectedClassId(node.id);
+                    setSelectedRelId(null);
+                  }}
+                  onEdgeClick={(_e, edge) => {
+                    setSelectedRelId(edge.id);
+                    setSelectedClassId(null);
+                  }}
+                  onPaneClick={() => {
+                    setSelectedClassId(null);
+                    setSelectedRelId(null);
+                    setHighlightedIds([]);
+                  }}
+                  fitView
+                >
+                  <Background color="#1e293b" gap={20} />
+                  <Controls className="!bg-slate-900 !border-slate-800 !fill-slate-200" />
+                </ReactFlow>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'EVALUATION' && (
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {!currentAttempt?.report ? (
+                <div className="text-center py-20 space-y-3">
+                  <Sparkles className="w-10 h-10 text-indigo-400 mx-auto opacity-70" />
+                  <p className="text-sm text-slate-300">
+                    No evaluation report selected. Click <strong>Submit Design</strong> to evaluate your class diagram.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+                    <div>
+                      <span className="text-xs uppercase tracking-wider text-slate-400">
+                        Attempt #{currentAttempt.attemptNumber} Evaluation
+                      </span>
+                      <div className="text-3xl font-extrabold text-white mt-1">
+                        {currentAttempt.report.totalScore}{' '}
+                        <span className="text-base font-normal text-slate-400">/ 100</span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Strategy:{' '}
+                        <strong className="text-indigo-300">
+                          {currentAttempt.report.evaluatorMetadata.strategyUsed}
+                        </strong>
+                        {currentAttempt.report.evaluatorMetadata.fallbackReason && (
+                          <span className="ml-2 text-amber-400">
+                            ({currentAttempt.report.evaluatorMetadata.fallbackReason})
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleRetryFromAttempt(currentAttempt)}
+                      className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Refine & Retry Attempt</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                    {[
+                      { label: 'Requirements', val: currentAttempt.report.criterionScores.requirementCoverage, max: 25 },
+                      { label: 'Cohesion', val: currentAttempt.report.criterionScores.responsibilitiesAndCohesion, max: 20 },
+                      { label: 'Coupling', val: currentAttempt.report.criterionScores.relationshipsAndCoupling, max: 20 },
+                      { label: 'Abstractions', val: currentAttempt.report.criterionScores.extensibilityAndAbstractions, max: 20 },
+                      { label: 'Behaviour', val: currentAttempt.report.criterionScores.behaviourAndRationale, max: 15 },
+                    ].map((c) => (
+                      <div key={c.label} className="p-3 rounded-lg bg-slate-900/70 border border-slate-800 text-center">
+                        <div className="text-[11px] text-slate-400">{c.label}</div>
+                        <div className="text-base font-bold text-slate-100 mt-0.5">
+                          {c.val}/{c.max}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="space-y-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                      Architectural Strengths
+                    </h3>
+                    <div className="space-y-1.5">
+                      {currentAttempt.report.strengths.map((s, idx) => (
+                        <div
+                          key={idx}
+                          className="p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-xs text-emerald-200 flex items-center gap-2"
+                        >
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <span>{s}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                      Specific Findings & Evidence (Click to Highlight on Canvas)
+                    </h3>
+                    {currentAttempt.report.findings.length === 0 ? (
+                      <p className="text-xs text-slate-400">No issues detected! Excellent design.</p>
+                    ) : (
+                      currentAttempt.report.findings.map((f) => (
+                        <div
+                          key={f.id}
+                          onClick={() => {
+                            if (f.affectedElementIds.length > 0) {
+                              setHighlightedIds(f.affectedElementIds);
+                              setActiveTab('DESIGN');
+                            }
+                          }}
+                          className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-indigo-500/50 cursor-pointer transition space-y-2"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                                f.severity === 'ERROR'
+                                  ? 'bg-rose-500/20 text-rose-300'
+                                  : f.severity === 'WARNING'
+                                  ? 'bg-amber-500/20 text-amber-300'
+                                  : 'bg-sky-500/20 text-sky-300'
+                              }`}
+                            >
+                              {f.severity} • {f.criterion} ({f.source})
+                            </span>
+                            {f.affectedElementIds.length > 0 && (
+                              <span className="text-[11px] text-indigo-400 underline">
+                                Highlight {f.affectedElementIds.join(', ')} on Canvas
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs font-semibold text-white">{f.observation}</p>
+                          <p className="text-xs text-slate-300">{f.explanation}</p>
+                          <div className="text-[11px] font-mono text-slate-400 bg-slate-950 p-2 rounded border border-slate-800">
+                            <strong>Evidence:</strong> {f.evidence}
+                          </div>
+                          <div className="text-xs text-emerald-300">
+                            <strong>Recommendation:</strong> {f.recommendation}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'HISTORY' && (
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <h2 className="text-base font-bold text-white">
+                Immutable Attempt History ({attempts.length})
+              </h2>
+              {attempts.map((att) => (
+                <div
+                  key={att.id}
+                  className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-sm text-white">
+                        Attempt #{att.attemptNumber}
+                      </span>
+                      <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-emerald-400 font-mono">
+                        {att.report ? `${att.report.totalScore}/100` : att.status}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {att.submission.classes.length} classes, {att.submission.relationships.length}{' '}
+                      relationships • {new Date(att.createdAt).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setCurrentAttempt(att);
+                        loadSubmissionIntoEditor(att.submission);
+                        setActiveTab('EVALUATION');
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200"
+                    >
+                      View Report
+                    </button>
+                    <button
+                      onClick={() => handleRetryFromAttempt(att)}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-medium"
+                    >
+                      Start New Attempt From Snapshot
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <aside className="col-span-3 border-l border-slate-800 bg-slate-900/60 flex flex-col overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
+              <Layers className="w-4 h-4 text-indigo-400" />
+              <span>Property Inspector</span>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-6 text-xs">
+            {!selectedClass && !selectedRel && (
+              <div className="text-center py-16 text-slate-500 space-y-2">
+                <Info className="w-7 h-7 mx-auto opacity-50" />
+                <p>Select a Class node or Relationship edge on the canvas to inspect and edit its properties.</p>
+              </div>
+            )}
+
+            {selectedClass && (
+              <>
+                <div className="space-y-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Visual Layout (Canvas Coordinates)
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { label: 'X', key: 'x', val: selectedClass.layout?.x ?? 100 },
+                      { label: 'Y', key: 'y', val: selectedClass.layout?.y ?? 100 },
+                      { label: 'W', key: 'width', val: selectedClass.layout?.width ?? 220 },
+                      { label: 'H', key: 'height', val: selectedClass.layout?.height ?? 140 },
+                      { label: 'Rot°', key: 'rotation', val: selectedClass.layout?.rotation ?? 0 },
+                    ].map((coord) => (
+                      <div
+                        key={coord.key}
+                        className="flex items-center bg-slate-950 border border-slate-800 rounded px-2 py-1"
+                      >
+                        <span className="text-[10px] text-slate-500 w-7">{coord.label}</span>
+                        <input
+                          type="number"
+                          value={coord.val}
+                          onChange={(e) =>
+                            updateSelectedClass((c) => ({
+                              ...c,
+                              layout: {
+                                ...(c.layout || { x: 100, y: 100, width: 220, height: 140, rotation: 0 }),
+                                [coord.key]: Number(e.target.value),
+                              },
+                            }))
+                          }
+                          className="w-full bg-transparent text-right text-slate-200 font-mono focus:outline-none"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3 pt-4 border-t border-slate-800">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Semantic Class Properties
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Class Name *</label>
+                    <input
+                      type="text"
+                      value={selectedClass.name}
+                      onChange={(e) =>
+                        updateSelectedClass((c) => ({ ...c, name: e.target.value }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-100 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Stereotype / Kind</label>
+                    <select
+                      value={selectedClass.kind}
+                      onChange={(e) =>
+                        updateSelectedClass((c) => ({
+                          ...c,
+                          kind: e.target.value as ClassKind,
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-100"
+                    >
+                      <option value="class">Concrete Class</option>
+                      <option value="interface">Interface (&lt;&lt;interface&gt;&gt;)</option>
+                      <option value="abstract">Abstract Class (&lt;&lt;abstract&gt;&gt;)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-2.5 pt-4 border-t border-slate-800">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      Attributes ({selectedClass.attributes.length})
+                    </span>
+                    <button
+                      onClick={() =>
+                        updateSelectedClass((c) => ({
+                          ...c,
+                          attributes: [
+                            ...c.attributes,
+                            {
+                              id: 'attr-' + Date.now(),
+                              name: 'field' + (c.attributes.length + 1),
+                              type: 'string',
+                              visibility: '-',
+                            },
+                          ],
+                        }))
+                      }
+                      className="text-indigo-400 hover:text-indigo-300 flex items-center gap-0.5 text-[11px]"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add
+                    </button>
+                  </div>
+
+                  {selectedClass.attributes.map((attr, idx) => (
+                    <div key={attr.id} className="flex items-center gap-1.5">
+                      <select
+                        value={attr.visibility}
+                        onChange={(e) =>
+                          updateSelectedClass((c) => {
+                            const next = [...c.attributes];
+                            next[idx] = { ...attr, visibility: e.target.value as Visibility };
+                            return { ...c, attributes: next };
+                          })
+                        }
+                        className="bg-slate-950 border border-slate-800 rounded px-1.5 py-1 font-mono text-indigo-300"
+                      >
+                        <option value="+">+</option>
+                        <option value="-">-</option>
+                        <option value="#">#</option>
+                      </select>
+                      <input
+                        type="text"
+                        value={attr.name}
+                        onChange={(e) =>
+                          updateSelectedClass((c) => {
+                            const next = [...c.attributes];
+                            next[idx] = { ...attr, name: e.target.value };
+                            return { ...c, attributes: next };
+                          })
+                        }
+                        placeholder="name"
+                        className="w-24 bg-slate-950 border border-slate-800 rounded px-2 py-1 font-mono"
+                      />
+                      <input
+                        type="text"
+                        value={attr.type}
+                        onChange={(e) =>
+                          updateSelectedClass((c) => {
+                            const next = [...c.attributes];
+                            next[idx] = { ...attr, type: e.target.value };
+                            return { ...c, attributes: next };
+                          })
+                        }
+                        placeholder="type"
+                        className="flex-1 bg-slate-950 border border-slate-800 rounded px-2 py-1 font-mono text-amber-300"
+                      />
+                      <button
+                        onClick={() =>
+                          updateSelectedClass((c) => ({
+                            ...c,
+                            attributes: c.attributes.filter((a) => a.id !== attr.id),
+                          }))
+                        }
+                        className="text-slate-500 hover:text-rose-400"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-2.5 pt-4 border-t border-slate-800">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      Methods ({selectedClass.methods.length})
+                    </span>
+                    <button
+                      onClick={() =>
+                        updateSelectedClass((c) => ({
+                          ...c,
+                          methods: [
+                            ...c.methods,
+                            {
+                              id: 'meth-' + Date.now(),
+                              name: 'operation' + (c.methods.length + 1),
+                              returnType: 'void',
+                              visibility: '+',
+                              parameters: [],
+                            },
+                          ],
+                        }))
+                      }
+                      className="text-indigo-400 hover:text-indigo-300 flex items-center gap-0.5 text-[11px]"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add
+                    </button>
+                  </div>
+
+                  {selectedClass.methods.map((meth, idx) => (
+                    <div
+                      key={meth.id}
+                      className="p-2 rounded bg-slate-950/80 border border-slate-800 space-y-2"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          value={meth.visibility}
+                          onChange={(e) =>
+                            updateSelectedClass((c) => {
+                              const next = [...c.methods];
+                              next[idx] = { ...meth, visibility: e.target.value as Visibility };
+                              return { ...c, methods: next };
+                            })
+                          }
+                          className="bg-slate-900 border border-slate-800 rounded px-1.5 py-1 font-mono text-emerald-300"
+                        >
+                          <option value="+">+</option>
+                          <option value="-">-</option>
+                          <option value="#">#</option>
+                        </select>
+                        <input
+                          type="text"
+                          value={meth.name}
+                          onChange={(e) =>
+                            updateSelectedClass((c) => {
+                              const next = [...c.methods];
+                              next[idx] = { ...meth, name: e.target.value };
+                              return { ...c, methods: next };
+                            })
+                          }
+                          placeholder="methodName"
+                          className="flex-1 bg-slate-900 border border-slate-800 rounded px-2 py-1 font-mono"
+                        />
+                        <input
+                          type="text"
+                          value={meth.returnType}
+                          onChange={(e) =>
+                            updateSelectedClass((c) => {
+                              const next = [...c.methods];
+                              next[idx] = { ...meth, returnType: e.target.value };
+                              return { ...c, methods: next };
+                            })
+                          }
+                          placeholder="returnType"
+                          className="w-20 bg-slate-900 border border-slate-800 rounded px-2 py-1 font-mono text-sky-300"
+                        />
+                        <button
+                          onClick={() =>
+                            updateSelectedClass((c) => ({
+                              ...c,
+                              methods: c.methods.filter((m) => m.id !== meth.id),
+                            }))
+                          }
+                          className="text-slate-500 hover:text-rose-400"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="pl-2 border-l border-slate-800 space-y-1">
+                        <div className="flex items-center justify-between text-[10px] text-slate-400">
+                          <span>Parameters ({meth.parameters.length})</span>
+                          <button
+                            onClick={() =>
+                              updateSelectedClass((c) => {
+                                const next = [...c.methods];
+                                next[idx] = {
+                                  ...meth,
+                                  parameters: [
+                                    ...meth.parameters,
+                                    { name: 'arg' + (meth.parameters.length + 1), type: 'string' },
+                                  ],
+                                };
+                                return { ...c, methods: next };
+                              })
+                            }
+                            className="text-indigo-400 hover:underline"
+                          >
+                            + Param
+                          </button>
+                        </div>
+                        {meth.parameters.map((param, pIdx) => (
+                          <div key={pIdx} className="flex items-center gap-1">
+                            <input
+                              type="text"
+                              value={param.name}
+                              onChange={(e) =>
+                                updateSelectedClass((c) => {
+                                  const next = [...c.methods];
+                                  const nextParams = [...meth.parameters];
+                                  nextParams[pIdx] = { ...param, name: e.target.value };
+                                  next[idx] = { ...meth, parameters: nextParams };
+                                  return { ...c, methods: next };
+                                })
+                              }
+                              placeholder="param"
+                              className="w-20 bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-[10px] font-mono"
+                            />
+                            <input
+                              type="text"
+                              value={param.type}
+                              onChange={(e) =>
+                                updateSelectedClass((c) => {
+                                  const next = [...c.methods];
+                                  const nextParams = [...meth.parameters];
+                                  nextParams[pIdx] = { ...param, type: e.target.value };
+                                  next[idx] = { ...meth, parameters: nextParams };
+                                  return { ...c, methods: next };
+                                })
+                              }
+                              placeholder="type"
+                              className="flex-1 bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-[10px] font-mono text-amber-300"
+                            />
+                            <button
+                              onClick={() =>
+                                updateSelectedClass((c) => {
+                                  const next = [...c.methods];
+                                  next[idx] = {
+                                    ...meth,
+                                    parameters: meth.parameters.filter((_, i) => i !== pIdx),
+                                  };
+                                  return { ...c, methods: next };
+                                })
+                              }
+                              className="text-slate-500 hover:text-rose-400 text-[10px] px-1"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {selectedRel && (
+              <div className="space-y-4">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Relationship Properties
+                </div>
+
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">Relationship Type</label>
+                  <select
+                    value={selectedRel.type}
+                    onChange={(e) =>
+                      updateSelectedRel((r) => ({
+                        ...r,
+                        type: e.target.value as RelationshipType,
+                      }))
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-100"
+                  >
+                    <option value="association">Association (uses / links)</option>
+                    <option value="inheritance">Inheritance (is-a / extends)</option>
+                    <option value="composition">Composition (strong lifecycle has-a)</option>
+                    <option value="aggregation">Aggregation (shared has-a)</option>
+                    <option value="dependency">Dependency (dashed uses)</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Source Class</label>
+                    <select
+                      value={selectedRel.sourceId}
+                      onChange={(e) =>
+                        updateSelectedRel((r) => ({ ...r, sourceId: e.target.value }))
+                      }
+                      className="w-full px-2 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-200"
+                    >
+                      {classes.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Target Class</label>
+                    <select
+                      value={selectedRel.targetId}
+                      onChange={(e) =>
+                        updateSelectedRel((r) => ({ ...r, targetId: e.target.value }))
+                      }
+                      className="w-full px-2 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-200"
+                    >
+                      {classes.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Source Multiplicity
+                    </label>
+                    <input
+                      type="text"
+                      value={selectedRel.sourceMultiplicity || '1'}
+                      onChange={(e) =>
+                        updateSelectedRel((r) => ({ ...r, sourceMultiplicity: e.target.value }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Target Multiplicity
+                    </label>
+                    <input
+                      type="text"
+                      value={selectedRel.targetMultiplicity || '*'}
+                      onChange={(e) =>
+                        updateSelectedRel((r) => ({ ...r, targetMultiplicity: e.target.value }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">Label / Role</label>
+                  <input
+                    type="text"
+                    value={selectedRel.label || ''}
+                    onChange={(e) =>
+                      updateSelectedRel((r) => ({ ...r, label: e.target.value }))
+                    }
+                    placeholder="e.g., manages, delegates to"
+                    className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+};

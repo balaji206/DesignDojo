@@ -1,0 +1,144 @@
+import { AttemptRepository, ProblemRepository } from '../application/EvaluationService.js';
+import { PracticeAttempt } from '../domain/PracticeAttempt.js';
+import { Problem } from '../domain/types.js';
+import { AttemptModel, ProblemModel } from './models.js';
+import { SEED_PROBLEMS } from './seedData.js';
+
+export class MongoProblemRepository implements ProblemRepository {
+  async ensureSeeded(): Promise<void> {
+    for (const prob of SEED_PROBLEMS) {
+      await ProblemModel.updateOne({ id: prob.id }, { $set: prob }, { upsert: true });
+    }
+  }
+
+  async findAll(): Promise<Problem[]> {
+    const docs = await ProblemModel.find().lean();
+    return docs as unknown as Problem[];
+  }
+
+  async findByIdOrSlug(idOrSlug: string): Promise<Problem | null> {
+    const doc = await ProblemModel.findOne({
+      $or: [{ id: idOrSlug }, { slug: idOrSlug }],
+    }).lean();
+    return (doc as unknown as Problem) || null;
+  }
+}
+
+export class MongoAttemptRepository implements AttemptRepository {
+  async save(attempt: PracticeAttempt): Promise<void> {
+    const data = attempt.toJSON();
+    await AttemptModel.updateOne({ id: data.id }, { $set: data }, { upsert: true });
+  }
+
+  async findById(id: string, learnerId: string): Promise<PracticeAttempt | null> {
+    const doc: any = await AttemptModel.findOne({ id, learnerId }).lean();
+    if (!doc) return null;
+    return new PracticeAttempt({
+      id: doc.id,
+      learnerId: doc.learnerId,
+      problemId: doc.problemId,
+      attemptNumber: doc.attemptNumber,
+      basedOnAttemptId: doc.basedOnAttemptId,
+      submission: doc.submission,
+      status: doc.status,
+      report: doc.report,
+      failureReason: doc.failureReason,
+      createdAt: new Date(doc.createdAt),
+      updatedAt: new Date(doc.updatedAt),
+    });
+  }
+
+  async findByProblem(problemId: string, learnerId: string): Promise<PracticeAttempt[]> {
+    const docs: any[] = await AttemptModel.find({ problemId, learnerId })
+      .sort({ attemptNumber: -1 })
+      .lean();
+    return docs.map(
+      (doc) =>
+        new PracticeAttempt({
+          id: doc.id,
+          learnerId: doc.learnerId,
+          problemId: doc.problemId,
+          attemptNumber: doc.attemptNumber,
+          basedOnAttemptId: doc.basedOnAttemptId,
+          submission: doc.submission,
+          status: doc.status,
+          report: doc.report,
+          failureReason: doc.failureReason,
+          createdAt: new Date(doc.createdAt),
+          updatedAt: new Date(doc.updatedAt),
+        })
+    );
+  }
+
+  async findAllByLearner(learnerId: string): Promise<PracticeAttempt[]> {
+    const docs: any[] = await AttemptModel.find({ learnerId }).sort({ createdAt: -1 }).lean();
+    return docs.map(
+      (doc) =>
+        new PracticeAttempt({
+          id: doc.id,
+          learnerId: doc.learnerId,
+          problemId: doc.problemId,
+          attemptNumber: doc.attemptNumber,
+          basedOnAttemptId: doc.basedOnAttemptId,
+          submission: doc.submission,
+          status: doc.status,
+          report: doc.report,
+          failureReason: doc.failureReason,
+          createdAt: new Date(doc.createdAt),
+          updatedAt: new Date(doc.updatedAt),
+        })
+    );
+  }
+
+  async countByProblem(problemId: string, learnerId: string): Promise<number> {
+    return AttemptModel.countDocuments({ problemId, learnerId });
+  }
+}
+
+export class InMemoryProblemRepository implements ProblemRepository {
+  private problems: Problem[] = [...SEED_PROBLEMS];
+
+  async ensureSeeded(): Promise<void> {
+    this.problems = [...SEED_PROBLEMS];
+  }
+
+  async findAll(): Promise<Problem[]> {
+    return this.problems;
+  }
+
+  async findByIdOrSlug(idOrSlug: string): Promise<Problem | null> {
+    return this.problems.find((p) => p.id === idOrSlug || p.slug === idOrSlug) || null;
+  }
+}
+
+export class InMemoryAttemptRepository implements AttemptRepository {
+  private store = new Map<string, PracticeAttempt>();
+
+  async save(attempt: PracticeAttempt): Promise<void> {
+    this.store.set(attempt.id, new PracticeAttempt(attempt.toJSON()));
+  }
+
+  async findById(id: string, learnerId: string): Promise<PracticeAttempt | null> {
+    const found = this.store.get(id);
+    return found && found.learnerId === learnerId ? new PracticeAttempt(found.toJSON()) : null;
+  }
+
+  async findByProblem(problemId: string, learnerId: string): Promise<PracticeAttempt[]> {
+    return Array.from(this.store.values())
+      .filter((a) => a.problemId === problemId && a.learnerId === learnerId)
+      .sort((a, b) => b.attemptNumber - a.attemptNumber);
+  }
+
+  async findAllByLearner(learnerId: string): Promise<PracticeAttempt[]> {
+    return Array.from(this.store.values())
+      .filter((a) => a.learnerId === learnerId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  async countByProblem(problemId: string, learnerId: string): Promise<number> {
+    return Array.from(this.store.values()).filter(
+      (a) => a.problemId === problemId && a.learnerId === learnerId
+    ).length;
+  }
+}
+

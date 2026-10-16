@@ -1,0 +1,536 @@
+import { z } from 'zod';
+import {
+  CriterionKey,
+  CriterionScores,
+  EvaluationFinding,
+  EvaluationReport,
+  Problem,
+  Submission,
+} from '../domain/types.js';
+
+export interface EvaluationStrategy {
+  evaluate(problem: Problem, submission: Submission): Promise<EvaluationReport>;
+}
+
+export function clampScore(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+export function aggregateTotalScore(scores: CriterionScores): number {
+  const sum =
+    clampScore(scores.requirementCoverage, 0, 25) +
+    clampScore(scores.responsibilitiesAndCohesion, 0, 20) +
+    clampScore(scores.relationshipsAndCoupling, 0, 20) +
+    clampScore(scores.extensibilityAndAbstractions, 0, 20) +
+    clampScore(scores.behaviourAndRationale, 0, 15);
+  return clampScore(sum, 0, 100);
+}
+
+export class RuleBasedEvaluator implements EvaluationStrategy {
+  async evaluate(problem: Problem, submission: Submission): Promise<EvaluationReport> {
+    const findings: EvaluationFinding[] = [];
+    const strengths: string[] = [];
+    const recommendations: string[] = [];
+
+    const scores: CriterionScores = {
+      requirementCoverage: 25,
+      responsibilitiesAndCohesion: 20,
+      relationshipsAndCoupling: 20,
+      extensibilityAndAbstractions: 20,
+      behaviourAndRationale: 15,
+    };
+
+    const classIds = new Set<string>();
+    const classNames = new Map<string, string>();
+
+    for (const cls of submission.classes) {
+      if (classIds.has(cls.id)) {
+        findings.push({
+          id: `rule-dup-id-${cls.id}`,
+          severity: 'ERROR',
+          criterion: 'responsibilitiesAndCohesion',
+          affectedElementIds: [cls.id],
+          observation: `Duplicate class identifier '${cls.id}' detected.`,
+          explanation: 'Every class node in a structural diagram must have a unique identifier.',
+          recommendation: 'Remove or regenerate the duplicate class node.',
+          evidence: `Class ID '${cls.id}' appears multiple times.`,
+          source: 'RULE',
+        });
+        scores.responsibilitiesAndCohesion -= 6;
+      }
+      classIds.add(cls.id);
+
+      const normalizedName = cls.name.trim().toLowerCase();
+      if (classNames.has(normalizedName)) {
+        findings.push({
+          id: `rule-dup-name-${cls.id}`,
+          severity: 'ERROR',
+          criterion: 'responsibilitiesAndCohesion',
+          affectedElementIds: [cls.id, classNames.get(normalizedName)!],
+          observation: `Duplicate class name '${cls.name}' found.`,
+          explanation: 'Duplicate class names create ambiguity in responsibility allocation.',
+          recommendation: `Rename or merge duplicate '${cls.name}' classes.`,
+          evidence: `Multiple classes share name '${cls.name}'.`,
+          source: 'RULE',
+        });
+        scores.responsibilitiesAndCohesion -= 5;
+      } else {
+        classNames.set(normalizedName, cls.id);
+      }
+
+      if (cls.attributes.length === 0 && cls.methods.length === 0) {
+        findings.push({
+          id: `rule-empty-cls-${cls.id}`,
+          severity: 'WARNING',
+          criterion: 'behaviourAndRationale',
+          affectedElementIds: [cls.id],
+          observation: `${cls.kind} '${cls.name}' has no attributes or methods.`,
+          explanation: 'Empty classes do not express state or behavioral contracts.',
+          recommendation: `Add domain attributes or behavioral methods to '${cls.name}'.`,
+          evidence: `${cls.name} has 0 attributes and 0 methods.`,
+          source: 'RULE',
+        });
+        scores.behaviourAndRationale -= 3;
+      }
+    }
+
+    for (const rel of submission.relationships) {
+      const missingEndpoints: string[] = [];
+      if (!classIds.has(rel.sourceId)) missingEndpoints.push(rel.sourceId);
+      if (!classIds.has(rel.targetId)) missingEndpoints.push(rel.targetId);
+
+      if (missingEndpoints.length > 0) {
+        findings.push({
+          id: `rule-dangling-rel-${rel.id}`,
+          severity: 'ERROR',
+          criterion: 'relationshipsAndCoupling',
+          affectedElementIds: [rel.id],
+          observation: `Relationship '${rel.id}' references non-existent class ID(s): ${missingEndpoints.join(', ')}.`,
+          explanation: 'All relationships must connect existing source and target classes.',
+          recommendation: 'Reconnect or delete the dangling relationship.',
+          evidence: `Relationship(${rel.sourceId} -> ${rel.targetId}) missing endpoint.`,
+          source: 'RULE',
+        });
+        scores.relationshipsAndCoupling -= 8;
+      } else if (
+        rel.sourceId === rel.targetId &&
+        (rel.type === 'inheritance' || rel.type === 'composition')
+      ) {
+        findings.push({
+          id: `rule-self-rel-${rel.id}`,
+          severity: 'ERROR',
+          criterion: 'relationshipsAndCoupling',
+          affectedElementIds: [rel.id, rel.sourceId],
+          observation: `Invalid self-${rel.type} on class '${rel.sourceId}'.`,
+          explanation: `A class cannot inherit from or compose itself via ${rel.type}.`,
+          recommendation: 'Connect two distinct classes or use association.',
+          evidence: `sourceId === targetId (${rel.sourceId}) with type '${rel.type}'.`,
+          source: 'RULE',
+        });
+        scores.relationshipsAndCoupling -= 5;
+      }
+    }
+
+    for (const concept of problem.rubric.expectedConcepts) {
+      const matchedClass = submission.classes.find((c) =>
+        concept.nameVariants.some((variant) =>
+          c.name.toLowerCase().includes(variant.toLowerCase())
+        )
+      );
+
+      if (!matchedClass) {
+        findings.push({
+          id: `rule-missing-concept-${concept.nameVariants[0]}`,
+          severity: 'WARNING',
+          criterion: 'requirementCoverage',
+          affectedElementIds: [],
+          observation: `Missing expected domain concept: ${concept.description} (e.g., ${concept.nameVariants.join(' / ')}).`,
+          explanation: `The problem requirements depend on modeling ${concept.description}.`,
+          recommendation: `Add a class or interface representing ${concept.nameVariants[0]}.`,
+          evidence: `No class matched variants [${concept.nameVariants.join(', ')}].`,
+          source: 'RULE',
+        });
+        scores.requirementCoverage -= 5;
+      } else {
+        strengths.push(`Modeled core concept '${matchedClass.name}' (${concept.description}).`);
+        if (concept.requiredMethods && concept.requiredMethods.length > 0) {
+          const submittedMethodNames = matchedClass.methods.map((m) => m.name.toLowerCase());
+          const hasExpected = concept.requiredMethods.some((reqM) =>
+            submittedMethodNames.some((subM) => subM.includes(reqM.toLowerCase()))
+          );
+          if (!hasExpected) {
+            findings.push({
+              id: `rule-missing-method-${matchedClass.id}`,
+              severity: 'INFO',
+              criterion: 'behaviourAndRationale',
+              affectedElementIds: [matchedClass.id],
+              observation: `'${matchedClass.name}' is missing expected operations (e.g., ${concept.requiredMethods.join(', ')}).`,
+              explanation: 'Domain classes should expose behavioral methods matching their responsibility.',
+              recommendation: `Add method(s) such as ${concept.requiredMethods[0]}() to '${matchedClass.name}'.`,
+              evidence: `'${matchedClass.name}' methods: [${matchedClass.methods.map((m) => m.name).join(', ') || 'none'}].`,
+              source: 'RULE',
+            });
+            scores.behaviourAndRationale -= 2;
+          }
+        }
+      }
+    }
+
+    const hasAbstraction = submission.classes.some(
+      (c) => c.kind === 'interface' || c.kind === 'abstract'
+    );
+    if (problem.rubric.requireInterfacesOrAbstract && !hasAbstraction) {
+      findings.push({
+        id: 'rule-no-abstraction',
+        severity: 'WARNING',
+        criterion: 'extensibilityAndAbstractions',
+        affectedElementIds: [],
+        observation: 'No interfaces or abstract classes were defined.',
+        explanation: 'Interfaces decouple policy/strategy variations (Open/Closed Principle).',
+        recommendation: 'Introduce an interface or abstract class for extensible behaviors.',
+        evidence: '0 interfaces and 0 abstract classes found.',
+        source: 'RULE',
+      });
+      scores.extensibilityAndAbstractions -= 7;
+    } else if (hasAbstraction) {
+      strengths.push('Uses interfaces or abstract classes to promote extensibility.');
+    }
+
+    if (submission.relationships.length < problem.rubric.minimumRelationships) {
+      findings.push({
+        id: 'rule-low-relationships',
+        severity: 'WARNING',
+        criterion: 'relationshipsAndCoupling',
+        affectedElementIds: [],
+        observation: `Only ${submission.relationships.length} relationship(s) defined (minimum recommended: ${problem.rubric.minimumRelationships}).`,
+        explanation: 'Unconnected classes cannot collaborate to fulfill system workflows.',
+        recommendation: 'Connect collaborating classes with composition, aggregation, inheritance, or associations.',
+        evidence: `Submitted ${submission.relationships.length} relationships.`,
+        source: 'RULE',
+      });
+      scores.relationshipsAndCoupling -= 6;
+    }
+
+    if (!submission.rationale || submission.rationale.trim().length < 25) {
+      findings.push({
+        id: 'rule-short-rationale',
+        severity: 'INFO',
+        criterion: 'behaviourAndRationale',
+        affectedElementIds: [],
+        observation: 'Design rationale is missing or brief.',
+        explanation: 'Explaining design patterns and trade-offs is key in LLD evaluations.',
+        recommendation: 'Add a short rationale explaining your pattern choices and trade-offs.',
+        evidence: `Rationale length: ${submission.rationale?.trim().length ?? 0} chars.`,
+        source: 'RULE',
+      });
+      scores.behaviourAndRationale -= 4;
+    } else {
+      strengths.push('Included clear design rationale explaining architectural trade-offs.');
+    }
+
+    const clampedScores: CriterionScores = {
+      requirementCoverage: clampScore(scores.requirementCoverage, 0, 25),
+      responsibilitiesAndCohesion: clampScore(scores.responsibilitiesAndCohesion, 0, 20),
+      relationshipsAndCoupling: clampScore(scores.relationshipsAndCoupling, 0, 20),
+      extensibilityAndAbstractions: clampScore(scores.extensibilityAndAbstractions, 0, 20),
+      behaviourAndRationale: clampScore(scores.behaviourAndRationale, 0, 15),
+    };
+
+    for (const f of findings) recommendations.push(f.recommendation);
+
+    return {
+      totalScore: aggregateTotalScore(clampedScores),
+      criterionScores: clampedScores,
+      strengths: strengths.length > 0 ? strengths : ['Valid structural class diagram submitted.'],
+      findings,
+      recommendations: Array.from(new Set(recommendations)),
+      evaluatorMetadata: {
+        strategyUsed: 'RULE_ONLY',
+        fallbackTriggered: false,
+        evaluatedAt: new Date().toISOString(),
+      },
+    };
+  }
+}
+
+function normalizeFindingSeverity(val: unknown): 'ERROR' | 'WARNING' | 'INFO' {
+  if (typeof val === 'string') {
+    const s = val.trim().toUpperCase();
+    if (s === 'CRITICAL' || s === 'ERROR' || s === 'FATAL' || s === 'HIGH') return 'ERROR';
+    if (s === 'MAJOR' || s === 'WARNING' || s === 'MEDIUM' || s === 'WARN') return 'WARNING';
+    if (s === 'INFO' || s === 'MINOR' || s === 'LOW' || s === 'SUGGESTION') return 'INFO';
+  }
+  return 'WARNING';
+}
+
+function normalizeFindingCriterion(val: unknown): CriterionKey {
+  const allowed: CriterionKey[] = [
+    'requirementCoverage',
+    'responsibilitiesAndCohesion',
+    'relationshipsAndCoupling',
+    'extensibilityAndAbstractions',
+    'behaviourAndRationale',
+  ];
+  if (typeof val === 'string' && (allowed as string[]).includes(val)) {
+    return val as CriterionKey;
+  }
+  if (typeof val === 'string') {
+    const s = val.toLowerCase().replace(/[_-]/g, '');
+    if (s.includes('require')) return 'requirementCoverage';
+    if (s.includes('cohes') || s.includes('responsi')) return 'responsibilitiesAndCohesion';
+    if (s.includes('coupl') || s.includes('relat')) return 'relationshipsAndCoupling';
+    if (s.includes('extens') || s.includes('abstr')) return 'extensibilityAndAbstractions';
+    if (s.includes('behav') || s.includes('ration')) return 'behaviourAndRationale';
+  }
+  return 'responsibilitiesAndCohesion';
+}
+
+export const GeminiAIResponseSchema = z.object({
+  criterionAdjustments: z.preprocess(
+    (val: any) => {
+      const obj = val && typeof val === 'object' ? val : {};
+      return {
+        requirementCoverage: clampScore(Number(obj.requirementCoverage) || 0, -15, 5),
+        responsibilitiesAndCohesion: clampScore(Number(obj.responsibilitiesAndCohesion) || 0, -15, 5),
+        relationshipsAndCoupling: clampScore(Number(obj.relationshipsAndCoupling) || 0, -15, 5),
+        extensibilityAndAbstractions: clampScore(Number(obj.extensibilityAndAbstractions) || 0, -15, 5),
+        behaviourAndRationale: clampScore(Number(obj.behaviourAndRationale) || 0, -10, 5),
+      };
+    },
+    z.object({
+      requirementCoverage: z.number().min(-15).max(5),
+      responsibilitiesAndCohesion: z.number().min(-15).max(5),
+      relationshipsAndCoupling: z.number().min(-15).max(5),
+      extensibilityAndAbstractions: z.number().min(-15).max(5),
+      behaviourAndRationale: z.number().min(-10).max(5),
+    })
+  ),
+  strengths: z.preprocess(
+    (val: any) => (Array.isArray(val) ? val.filter((s) => typeof s === 'string') : []),
+    z.array(z.string()).max(6)
+  ),
+  findings: z.preprocess(
+    (val: any) => {
+      if (!Array.isArray(val)) return [];
+      return val.map((f: any) => ({
+        severity: normalizeFindingSeverity(f?.severity),
+        criterion: normalizeFindingCriterion(f?.criterion),
+        affectedElementIds: Array.isArray(f?.affectedElementIds) ? f.affectedElementIds.map(String) : [],
+        observation: typeof f?.observation === 'string' && f.observation.trim().length > 0 ? f.observation.trim() : 'Observation',
+        explanation: typeof f?.explanation === 'string' && f.explanation.trim().length > 0 ? f.explanation.trim() : 'Explanation',
+        recommendation: typeof f?.recommendation === 'string' && f.recommendation.trim().length > 0 ? f.recommendation.trim() : 'Recommendation',
+        evidence: typeof f?.evidence === 'string' && f.evidence.trim().length > 0 ? f.evidence.trim() : 'Evidence',
+      }));
+    },
+    z.array(
+      z.object({
+        severity: z.enum(['ERROR', 'WARNING', 'INFO']),
+        criterion: z.enum([
+          'requirementCoverage',
+          'responsibilitiesAndCohesion',
+          'relationshipsAndCoupling',
+          'extensibilityAndAbstractions',
+          'behaviourAndRationale',
+        ]),
+        affectedElementIds: z.array(z.string()),
+        observation: z.string().min(1),
+        explanation: z.string().min(1),
+        recommendation: z.string().min(1),
+        evidence: z.string().min(1),
+      })
+    )
+  ),
+});
+
+export type GeminiClientFn = (prompt: string, timeoutMs: number) => Promise<string>;
+
+export class AIEvaluator {
+  constructor(
+    private readonly callGemini: GeminiClientFn,
+    private readonly modelName: string = process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    private readonly timeoutMs: number = 15000
+  ) {}
+
+  async evaluateContextual(
+    problem: Problem,
+    submission: Submission,
+    deterministicReport: EvaluationReport
+  ): Promise<z.infer<typeof GeminiAIResponseSchema>> {
+    const validIds = new Set<string>([
+      ...submission.classes.map((c) => c.id),
+      ...submission.relationships.map((r) => r.id),
+    ]);
+
+    const prompt = `You are an expert Low-Level Design (LLD) reviewer.
+Multiple LLD solutions are valid. Do NOT penalize a learner merely for choosing a different valid class structure.
+Do NOT repeat issues already caught by the deterministic evaluator.
+
+PROBLEM: ${problem.title}
+DESCRIPTION: ${problem.description}
+REQUIREMENTS: ${problem.functionalRequirements.join('; ')}
+CONSTRAINTS: ${problem.constraints.join('; ')}
+
+SUBMITTED DESIGN:
+${JSON.stringify(submission)}
+
+EXISTING DETERMINISTIC FINDINGS:
+${JSON.stringify(deterministicReport.findings)}
+
+Respond with ONLY valid JSON matching this schema:
+{
+  "criterionAdjustments": {
+    "requirementCoverage": number (between -15 and 5),
+    "responsibilitiesAndCohesion": number (between -15 and 5),
+    "relationshipsAndCoupling": number (between -15 and 5),
+    "extensibilityAndAbstractions": number (between -15 and 5),
+    "behaviourAndRationale": number (between -10 and 5)
+  },
+  "strengths": string[] (up to 6 concise architectural strengths),
+  "findings": [
+    {
+      "severity": "ERROR" | "WARNING" | "INFO",
+      "criterion": "requirementCoverage" | "responsibilitiesAndCohesion" | "relationshipsAndCoupling" | "extensibilityAndAbstractions" | "behaviourAndRationale",
+      "affectedElementIds": string[] (MUST be actual class/relationship IDs from SUBMITTED DESIGN),
+      "observation": string,
+      "explanation": string,
+      "recommendation": string,
+      "evidence": string
+    }
+  ]
+}`;
+
+    const rawText = await this.callGemini(prompt, this.timeoutMs);
+    let parsed: any;
+    try {
+      const cleaned = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const firstBrace = rawText.indexOf('{');
+      const lastBrace = rawText.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        parsed = JSON.parse(rawText.slice(firstBrace, lastBrace + 1));
+      } else {
+        throw new Error('Could not parse JSON response from Gemini');
+      }
+    }
+
+    const validated = GeminiAIResponseSchema.parse(parsed);
+
+    validated.findings = validated.findings.map((f) => ({
+      ...f,
+      affectedElementIds: f.affectedElementIds.filter((id) => validIds.has(id)),
+    }));
+
+    return validated;
+  }
+
+  getModelName(): string {
+    return this.modelName;
+  }
+}
+
+export class HybridEvaluator implements EvaluationStrategy {
+  constructor(
+    private readonly ruleEvaluator: RuleBasedEvaluator,
+    private readonly aiEvaluator?: AIEvaluator
+  ) {}
+
+  async evaluate(problem: Problem, submission: Submission): Promise<EvaluationReport> {
+    const baseReport = await this.ruleEvaluator.evaluate(problem, submission);
+
+    if (!this.aiEvaluator) {
+      return {
+        ...baseReport,
+        evaluatorMetadata: {
+          ...baseReport.evaluatorMetadata,
+          strategyUsed: 'RULE_ONLY',
+          fallbackTriggered: true,
+          fallbackReason: 'AI evaluator not configured (GEMINI_API_KEY not set).',
+        },
+      };
+    }
+
+    try {
+      const aiResult = await this.aiEvaluator.evaluateContextual(problem, submission, baseReport);
+
+      const ruleKeys = new Set(
+        baseReport.findings.map((f) => `${f.criterion}:${[...f.affectedElementIds].sort().join(',')}`)
+      );
+
+      const deduplicatedAiFindings: EvaluationFinding[] = [];
+      aiResult.findings.forEach((f, idx) => {
+        const key = `${f.criterion}:${[...f.affectedElementIds].sort().join(',')}`;
+        if (!ruleKeys.has(key) || f.affectedElementIds.length === 0) {
+          deduplicatedAiFindings.push({
+            ...f,
+            id: `ai-finding-${idx + 1}`,
+            source: 'AI',
+          });
+        }
+      });
+
+      const mergedScores: CriterionScores = {
+        requirementCoverage: clampScore(
+          baseReport.criterionScores.requirementCoverage + aiResult.criterionAdjustments.requirementCoverage,
+          0,
+          25
+        ),
+        responsibilitiesAndCohesion: clampScore(
+          baseReport.criterionScores.responsibilitiesAndCohesion +
+            aiResult.criterionAdjustments.responsibilitiesAndCohesion,
+          0,
+          20
+        ),
+        relationshipsAndCoupling: clampScore(
+          baseReport.criterionScores.relationshipsAndCoupling +
+            aiResult.criterionAdjustments.relationshipsAndCoupling,
+          0,
+          20
+        ),
+        extensibilityAndAbstractions: clampScore(
+          baseReport.criterionScores.extensibilityAndAbstractions +
+            aiResult.criterionAdjustments.extensibilityAndAbstractions,
+          0,
+          20
+        ),
+        behaviourAndRationale: clampScore(
+          baseReport.criterionScores.behaviourAndRationale +
+            aiResult.criterionAdjustments.behaviourAndRationale,
+          0,
+          15
+        ),
+      };
+
+      const combinedFindings = [...baseReport.findings, ...deduplicatedAiFindings];
+      const combinedStrengths = Array.from(new Set([...baseReport.strengths, ...aiResult.strengths]));
+      const combinedRecommendations = Array.from(
+        new Set([...baseReport.recommendations, ...deduplicatedAiFindings.map((f) => f.recommendation)])
+      );
+
+      return {
+        totalScore: aggregateTotalScore(mergedScores),
+        criterionScores: mergedScores,
+        strengths: combinedStrengths,
+        findings: combinedFindings,
+        recommendations: combinedRecommendations,
+        evaluatorMetadata: {
+          strategyUsed: 'HYBRID_AI',
+          aiModel: this.aiEvaluator.getModelName(),
+          fallbackTriggered: false,
+          evaluatedAt: new Date().toISOString(),
+        },
+      };
+    } catch (err: any) {
+      return {
+        ...baseReport,
+        evaluatorMetadata: {
+          strategyUsed: 'RULE_ONLY',
+          aiModel: this.aiEvaluator.getModelName(),
+          fallbackTriggered: true,
+          fallbackReason: `AI evaluation unavailable (${err?.message || 'provider error'}); returned deterministic evaluation.`,
+          evaluatedAt: new Date().toISOString(),
+        },
+      };
+    }
+  }
+}
